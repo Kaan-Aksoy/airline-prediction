@@ -1,0 +1,149 @@
+---
+title: "Data Analysis Demonstration with NYC Flight Data"
+author: "Kaan Aksoy"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+# Summary
+
+This is a demonstration of exploratory data analysis (EDA) and predictive statistics using R. For the purposes of this demonstration, I use the data provided by the package `nycflights13` in order to ensure high-quality data. In reality, data may require additional cleaning, tidying, and general wrangling. I use this data in order to focus on the predictive statistics aspect of R without having to worry about data quality affecting model results.
+
+```{r loading-libraries, include=FALSE, message=FALSE}
+library(tidyverse)
+library(modelsummary)
+library(kableExtra)
+library(estimatr)
+library(nycflights13)
+```
+```{r load-data, include=FALSE}
+flights
+# "flights" is a dataframe provided by `nycflights13`. Ordinarily, this would be a .csv, .xls(x),
+# .txt, .json, .xml, or some other file type which would be read through `read_csv` (or another
+# applicable command). Since the data comes loaded with the package, there is no need to load it
+# in, but I leave this here for the purpose of clarity.
+```
+# The Data
+
+First, I look at the general characteristics of the data. These can give us useful insights.
+
+```{r data-dimension, include=TRUE}
+dim(flights) # Print the dimensions of the data.
+```
+From here, we understand that there are 336,776 observations and 19 variables in the data. This means that we are dealing with data from 336,776 flights. A next step would be to understand which time frame these flights belong to.
+```{r data-range, include=TRUE}
+range(flights$time_hour) # Print the range of the time_hour variable.
+```
+The variable `time_hour` is provided in a year-month-day, hour-minute-second format (more technically, as a POSIXct vector). In real analyses, this data may not be as precise. Using the `range` command, we make R give us the minimum and the maximum value of the supplied vector. As a result, we now know that we are looking at flights in 2013, starting from January 1 and ending on December 31.
+
+We might be interested in other aspects of an airport, such as delays, the variation in how much time a flight spends in the air, or distance between airports.
+```{r summary-stats, include=TRUE}
+datasummary((Distance = distance) +
+              (`Air Time` = air_time) +
+              (`Departure delay` = dep_delay) +
+              (`Arrival delay` = arr_delay) ~
+              (Mean + Median + SD + Max + Min + N),
+            data = flights,
+            title = "Descriptive statistics for NYC flights",
+            notes = list(c('Data from 2013.',
+                           'Negative values for departure and arrival delays indicate early departures/arrivals (in minutes).'))) %>% 
+  kable_styling(bootstrap_options = "condensed", latex_options = "HOLD_position")
+```
+
+Immediately, we see that the median flight flies 872 miles and spends 129 minutes in the air, departs two minutes early and arrives five minutes early. Meanwhile, the highest distance flown is 4,983 miles, and the most time spent in the air is 695 minutes, the longest departure delay is 1,301 minutes (or about 22 hours), while the longest arrival delay is 1,272 minutes (approximately 21 hours).
+
+We might also be curious about which airports have the most inbound and outgoing flights:
+```{r outgoing-flights, include=TRUE}
+flights %>% 
+  group_by(., origin) %>% 
+  summarise(., n = n()) %>% 
+  ungroup(.) %>% 
+  ggplot(., aes(x = origin,
+                y = n)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = scales::comma) +
+  scale_x_discrete(labels = c("Newark Liberty", "John F. Kennedy", "LaGuardia")) +
+  labs(title = "New York airports by number of originating flights",
+       subtitle = "Data spanning 2013",
+       x = "Airport",
+       y = "Number of outbound flights") +
+  theme_bw()
+```
+Interestingly enough, we see that in 2013, Newark Liberty International Airport had more outgoing flights than John F. Kennedy International Airport. We can also look at which airports receive the most flights from NYC airports.
+
+```{r inbound-flights, include=TRUE}
+flights %>% 
+  group_by(., dest) %>% 
+  summarise(., n = n()) %>% 
+  ungroup(.) %>% 
+  arrange(., desc(n)) %>% 
+  mutate(., dest = factor(dest, levels = dest)) %>% 
+  slice(., 1:10) %>% 
+  ggplot(., aes(x = dest,
+                y = n)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(labels = scales::comma,
+                     limits = c(0, 18000),
+                     breaks = seq(0, 18000, 2000)) +
+  scale_x_discrete(labels = c("Chicago O'Hare", "Atlanta", "Los Angeles", "Boston",
+                              "Orlando", "Charlotte", "San Francisco", "Fort Lauderdale",
+                              "Miami", "Ronald Reagan")) +
+  labs(title = "Top 10 airports by number of flights received from New York airports",
+       subtitle = "Data spanning 2013",
+       x = "Airport",
+       y = "Number of outbound flights") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 0.5, vjust = 0.5))
+```
+We see that Chicago's O'Hare International Airport receives the most flights from NYC airports, followed closely by Atlanta International Airport in Georgia. The graph is restricted to the top 10 recipients of flights from NYC airports for readability purposes.
+
+# Understanding Delays
+
+If we operated an airport, or were otherwise interested in airlines, we might be very curious about what causes delays and perhaps how to mitigate them, or at the very least be able to forecast them so that we can take pre-emptive action to mollify unhappy passengers. Considering that we are dealing with aircraft, we might imagine that weather conditions greatly impact how long flights take and whether they are substantially delayed.
+
+The `nycflights13` package also provides weather data. Naturally, if we were an airport, we would need to obtain this data independently (either from government agencies collecting such data, or on our own---most likely the former).
+
+```{r, include=FALSE}
+weather
+# "weather" is a dataframe provided by `nycflights13`. Like "flights," this would be a .csv or
+# another file type which would be read through `read_csv` (or its applicable command). I leave
+# it here for the same purpose as "flights."
+```
+
+I now merge the datasets `flights` and `weather` in order to match weather observations with flight data. This is where data wrangling comes in, as there are an unequal number of observations and variables between the two separate dataframes:
+
+```{r dimensions-between-two, include=TRUE}
+dim(flights); dim(weather)
+```
+
+The `flights` data has 336,776 observations while `weather` only has 26,115 observations, which will necessitate good use of join functions to merge them appropriately without creating duplicate or "rubbish" data. I name the new data frame `df1`. 
+
+```{r data-merge, include=TRUE}
+df1 <- left_join(flights, weather, by = c("origin", "time_hour"))
+dim(df1)
+```
+The resultant data frame has 336,776 observations and 32 variables. Some of the variables are duplicates (in specific, the individual year, month, and day variables have been duplicated) but this does not need to be addressed just yet. What is important is that the number of observations is the same as the data frame `flights`, which indicates that the merging process has not created duplicate or rubbish data which could distort our prediction models.
+
+With the necessary data at hand, we can now start considering which factors influence departure delays. We can imagine that wind speed, gust speed, precipitation, pressure, temperature, and visibility are all important factors in predicting delays. Therefore, we can model this.
+
+```{r predicting-delays, include=TRUE}
+fit1 <- lm(dep_delay ~ wind_speed + wind_gust + humid + precip + pressure + visib + temp,
+           data = df1)
+modelsummary(list(fit1), stars = c('*' = .1, '**' = .05, '***' = .01),
+             coef_map = c(
+               'wind_speed' = 'Wind speed (mph)',
+               'wind_gust' = 'Gust speed (mph)',
+               'humid' = 'Humidity',
+               'precip' = 'Precipitation (inches)',
+               'pressure' = 'Pressure (mbar)',
+               'visib' = 'Visibility (miles)',
+               'temp' = 'Temperature (Fº)',
+               '(Intercept)' = 'Intercept'
+             ),
+              gof_omit = 'AIC|BIC|Log.Lik.')
+```
+
